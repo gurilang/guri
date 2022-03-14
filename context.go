@@ -19,6 +19,8 @@ type CallContext struct {
 	Args []Object
 	// Kwargs called keyword arguments
 	Kwargs map[string]Object
+	// This current object
+	This Object
 }
 
 // GetArgs destructure args into dest

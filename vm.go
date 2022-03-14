@@ -21,8 +21,8 @@ type frame struct {
 
 // VM is a virtual machine that executes the bytecode compiled by Compiler.
 type VM struct {
+	bc          *Bytecode
 	context     *VmContext
-	constants   []Object
 	stack       [StackSize]Object
 	sp          int
 	globals     []Object
@@ -48,7 +48,7 @@ func NewVM(
 		globals = make([]Object, GlobalsSize)
 	}
 	v := &VM{
-		constants:   bytecode.Constants,
+		bc:          bytecode,
 		sp:          0,
 		globals:     globals,
 		fileSet:     bytecode.FileSet,
@@ -70,11 +70,6 @@ func (v *VM) Abort() {
 
 // Run starts the execution.
 func (v *VM) Run() (err error) {
-	return v.RunContext(context.Background())
-}
-
-// RunContext starts the execution with context.
-func (v *VM) RunContext(ctx context.Context) (err error) {
 	// reset VM states
 	v.sp = 0
 	v.curFrame = &(v.frames[0])
@@ -83,16 +78,11 @@ func (v *VM) RunContext(ctx context.Context) (err error) {
 	v.ip = -1
 	v.allocs = v.maxAllocs + 1
 
-	// set context cancelation
-	defer func() {
-		v.context = nil
-	}()
-	v.context = &VmContext{Context: ctx, VM: v}
-
 	v.run()
+
 	atomic.StoreInt64(&v.aborting, 0)
-	err = v.err
-	if err != nil {
+
+	if err = v.err; err != nil {
 		filePos := v.fileSet.Position(
 			v.curFrame.fn.SourcePos(v.ip - 1))
 		err = fmt.Errorf("Runtime Error: %w\n\tat %s",
@@ -104,9 +94,18 @@ func (v *VM) RunContext(ctx context.Context) (err error) {
 				v.curFrame.fn.SourcePos(v.curFrame.ip - 1))
 			err = fmt.Errorf("%w\n\tat %s", err, filePos)
 		}
-		return err
 	}
-	return nil
+	return
+}
+
+// RunContext starts the execution with context.
+func (v *VM) RunContext(ctx context.Context) (err error) {
+	old := v.context
+	defer func() {
+		v.context = old
+	}()
+	v.context = &VmContext{Context: ctx, VM: v}
+	return v.Run()
 }
 
 func (v *VM) run() {
@@ -116,14 +115,12 @@ func (v *VM) run() {
 		switch v.curInsts[v.ip] {
 		case parser.OpConstant:
 			v.ip += 2
-			cidx := int(v.curInsts[v.ip]) | int(v.curInsts[v.ip-1])<<8
-
-			v.stack[v.sp] = v.constants[cidx]
+			v.stack[v.sp] = v.bc.Constants[int(v.curInsts[v.ip])|int(v.curInsts[v.ip-1])<<8]
 			v.sp++
 		case parser.OpNull:
 			v.stack[v.sp] = UndefinedValue
 			v.sp++
-		case parser.OpNullKwarg:
+		case parser.OpDefault:
 			v.stack[v.sp] = DefaultValue
 			v.sp++
 		case parser.OpCallee:
@@ -198,10 +195,9 @@ func (v *VM) run() {
 			}
 			v.sp++
 		case parser.OpBComplement:
-			operand := v.stack[v.sp-1]
 			v.sp--
 
-			switch x := operand.(type) {
+			switch x := v.stack[v.sp].(type) {
 			case *Int:
 				var res Object = &Int{Value: ^x.Value}
 				v.allocs--
@@ -213,14 +209,13 @@ func (v *VM) run() {
 				v.sp++
 			default:
 				v.err = fmt.Errorf("invalid operation: ^%s",
-					operand.TypeName())
+					x.TypeName())
 				return
 			}
 		case parser.OpMinus:
-			operand := v.stack[v.sp-1]
 			v.sp--
 
-			switch x := operand.(type) {
+			switch x := v.stack[v.sp].(type) {
 			case *Int:
 				var res Object = &Int{Value: -x.Value}
 				v.allocs--
@@ -241,7 +236,7 @@ func (v *VM) run() {
 				v.sp++
 			default:
 				v.err = fmt.Errorf("invalid operation: -%s",
-					operand.TypeName())
+					x.TypeName())
 				return
 			}
 		case parser.OpJumpFalsy:
@@ -268,8 +263,7 @@ func (v *VM) run() {
 				v.ip = pos - 1
 			}
 		case parser.OpJump:
-			pos := int(v.curInsts[v.ip+2]) | int(v.curInsts[v.ip+1])<<8
-			v.ip = pos - 1
+			v.ip = int(v.curInsts[v.ip+2]) | int(v.curInsts[v.ip+1])<<8 - 1
 		case parser.OpSetGlobal:
 			v.ip += 2
 			v.sp--
@@ -287,7 +281,7 @@ func (v *VM) run() {
 			}
 			val := v.stack[v.sp-numSelectors-1]
 			v.sp -= numSelectors + 1
-			e := indexAssign(v.globals[globalIndex], val, selectors)
+			e := indexAssign(v, v.globals[globalIndex], val, selectors)
 			if e != nil {
 				v.err = e
 				return
@@ -295,8 +289,7 @@ func (v *VM) run() {
 		case parser.OpGetGlobal:
 			v.ip += 2
 			globalIndex := int(v.curInsts[v.ip]) | int(v.curInsts[v.ip-1])<<8
-			val := v.globals[globalIndex]
-			v.stack[v.sp] = val
+			v.stack[v.sp] = v.globals[globalIndex]
 			v.sp++
 		case parser.OpArray:
 			v.ip += 2
@@ -376,12 +369,8 @@ func (v *VM) run() {
 			left := v.stack[v.sp-2]
 			v.sp -= 2
 
-			val, err := left.IndexGet(index)
+			val, err := left.IndexGet(v, index)
 			if err != nil {
-				if err == ErrNotIndexable {
-					v.err = fmt.Errorf("not indexable: %s", index.TypeName())
-					return
-				}
 				if err == ErrInvalidIndexType {
 					v.err = fmt.Errorf("invalid index type: %s",
 						index.TypeName())
@@ -580,7 +569,7 @@ func (v *VM) run() {
 			start := v.sp - numArgs - hasVarArgs - hasKws - hasVarKw
 			value := v.stack[start-1]
 
-			if !v.stack[start-1].CanCall() {
+			if !value.CanCall() {
 				v.err = fmt.Errorf("not callable: %s", v.stack[start-1].TypeName())
 				return
 			}
@@ -632,7 +621,10 @@ func (v *VM) run() {
 				}
 			}
 
-			if callee, ok := v.stack[start-1].(*CompiledFunction); ok {
+			if callee, ok := value.(*CompiledFunction); ok {
+				if callee.methodTarget != nil {
+					args = append([]Object{callee.methodTarget}, args...)
+				}
 				if numArgs := len(args); numArgs > callee.NumArgs && !callee.VarArgs.Valid {
 					v.err = fmt.Errorf(
 						"wrong number of arguments: want=%d, got=%d",
@@ -657,6 +649,14 @@ func (v *VM) run() {
 					}
 				} else if callee.VarArgs.Name != "" {
 					v.stack[start+callee.NumArgs] = &Array{}
+				}
+
+				if len(args) > 0 {
+					copy(v.stack[start:], args[:callee.NumArgs])
+
+					if callee.VarArgs.Name != "" {
+						v.stack[start+callee.NumArgs] = &Array{Value: args[callee.NumArgs:]}
+					}
 				}
 
 				v.sp = start + callee.NumArgs
@@ -759,11 +759,23 @@ func (v *VM) run() {
 				v.framesIndex++
 				v.sp = v.curFrame.basePointer + callee.NumLocals
 			} else {
-				ret, e := v.stack[start-1].Call(&CallContext{
-					VM:     v,
-					Args:   args,
-					Kwargs: kwargs,
-				})
+				var (
+					ctx = &CallContext{
+						VM:     v,
+						Args:   args,
+						Kwargs: kwargs,
+						This:   value.MethodTo(),
+					}
+
+					method = ctx.This == nil && value.Method()
+				)
+
+				if method {
+					ctx.This = v.stack[start-2]
+				}
+
+				ret, e := value.Call(ctx)
+
 				v.sp = start - 1
 
 				// runtime error
@@ -800,8 +812,12 @@ func (v *VM) run() {
 					v.err = ErrObjectAllocLimit
 					return
 				}
-				v.stack[v.sp] = ret
-				v.sp++
+				if method {
+					v.stack[v.sp-1] = ret
+				} else {
+					v.stack[v.sp] = ret
+					v.sp++
+				}
 			}
 		case parser.OpReturn:
 			v.ip++
@@ -862,7 +878,7 @@ func (v *VM) run() {
 			if obj, ok := dst.(*ObjectPtr); ok {
 				dst = *obj.Value
 			}
-			if e := indexAssign(dst, val, selectors); e != nil {
+			if e := indexAssign(v, dst, val, selectors); e != nil {
 				v.err = e
 				return
 			}
@@ -884,7 +900,7 @@ func (v *VM) run() {
 			v.ip += 3
 			constIndex := int(v.curInsts[v.ip-1]) | int(v.curInsts[v.ip-2])<<8
 			numFree := int(v.curInsts[v.ip])
-			fn, ok := v.constants[constIndex].(*CompiledFunction)
+			fn, ok := v.bc.Constants[constIndex].(*CompiledFunction)
 			if !ok {
 				v.err = fmt.Errorf("not function: %s", fn.TypeName())
 				return
@@ -903,6 +919,7 @@ func (v *VM) run() {
 			v.sp -= numFree
 			cl := &CompiledFunction{
 				Instructions: fn.Instructions,
+				IsMethod:     fn.IsMethod,
 				NumLocals:    fn.NumLocals,
 				NumArgs:      fn.NumArgs,
 				VarArgs:      fn.VarArgs,
@@ -961,7 +978,7 @@ func (v *VM) run() {
 			}
 			val := v.stack[v.sp-numSelectors-1]
 			v.sp -= numSelectors + 1
-			e := indexAssign(*v.curFrame.freeVars[freeIndex].Value,
+			e := indexAssign(v, *v.curFrame.freeVars[freeIndex].Value,
 				val, selectors)
 			if e != nil {
 				v.err = e
@@ -1024,10 +1041,10 @@ func (v *VM) Context() *VmContext {
 	return v.context
 }
 
-func indexAssign(dst, src Object, selectors []Object) error {
+func indexAssign(vm *VM, dst, src Object, selectors []Object) error {
 	numSel := len(selectors)
 	for sidx := numSel - 1; sidx > 0; sidx-- {
-		next, err := dst.IndexGet(selectors[sidx])
+		next, err := dst.IndexGet(vm, selectors[sidx])
 		if err != nil {
 			if err == ErrNotIndexable {
 				return fmt.Errorf("not indexable: %s", dst.TypeName())
@@ -1041,7 +1058,7 @@ func indexAssign(dst, src Object, selectors []Object) error {
 		dst = next
 	}
 
-	if err := dst.IndexSet(selectors[0], src); err != nil {
+	if err := dst.IndexSet(vm, selectors[0], src); err != nil {
 		if err == ErrNotIndexAssignable {
 			return fmt.Errorf("not index-assignable: %s", dst.TypeName())
 		}

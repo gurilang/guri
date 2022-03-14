@@ -1102,7 +1102,7 @@ formatLoop:
 						// Go syntax
 						p.fmt.sharpV = p.fmt.sharp
 						p.fmt.sharp = false
-						// Struct-field syntax
+						// Type-field syntax
 						p.fmt.plusV = p.fmt.plus
 						p.fmt.plus = false
 					}
@@ -1200,7 +1200,7 @@ formatLoop:
 			// Go syntax
 			p.fmt.sharpV = p.fmt.sharp
 			p.fmt.sharp = false
-			// Struct-field syntax
+			// Type-field syntax
 			p.fmt.plusV = p.fmt.plus
 			p.fmt.plus = false
 			fallthrough

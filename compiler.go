@@ -226,7 +226,7 @@ func (c *Compiler) Compile(node parser.Node) error {
 	case *parser.UndefinedLit:
 		c.emit(node, parser.OpNull)
 	case *parser.DefaultLit:
-		c.emit(node, parser.OpNullKwarg)
+		c.emit(node, parser.OpDefault)
 	case *parser.CalleeLit:
 		c.emit(node, parser.OpCallee)
 	case *parser.CalledArgsLit:
@@ -365,7 +365,6 @@ func (c *Compiler) Compile(node parser.Node) error {
 			}
 			c.emit(node, parser.OpConstant,
 				c.addConstant(&String{Value: elt.Key}))
-
 			// value
 			if err := c.Compile(elt.Value); err != nil {
 				return err
@@ -413,8 +412,12 @@ func (c *Compiler) Compile(node parser.Node) error {
 
 		compiledFunction := &CompiledFunction{}
 
-		if node.Type.Params.Args != nil {
+		if node.Type.Params.Args.List != nil {
 			args := node.Type.Params.Args.List
+
+			if len(args) > 0 {
+				compiledFunction.IsMethod = args[0].Name == "this"
+			}
 
 			if node.Type.Params.Args.VarArgs {
 				compiledFunction.VarArgs.Valid = true

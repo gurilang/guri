@@ -5,6 +5,7 @@ import (
 	"io"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/d5/tengo/v2/token"
 )
@@ -797,6 +798,7 @@ func (p *Parser) parseFuncParams() *FuncParams {
 			}
 		}
 	}
+
 done:
 	rparen := p.expect(token.RParen)
 	return &FuncParams{
@@ -1182,15 +1184,26 @@ func (p *Parser) parseMapElementLit() *MapElementLit {
 	} else {
 		p.errorExpected(pos, "map key")
 	}
+
+	var (
+		element = &MapElementLit{
+			Key:    name,
+			KeyPos: pos,
+			Value:  &DefaultLit{},
+		}
+		next token.Token
+	)
+
 	p.next()
-	colonPos := p.expect(token.Colon)
-	valueExpr := p.parseExpr()
-	return &MapElementLit{
-		Key:      name,
-		KeyPos:   pos,
-		ColonPos: colonPos,
-		Value:    valueExpr,
+
+	if p.token != token.RBrace {
+		element.ColonPos, next = p.expectAny(token.Colon, token.Comma)
+		switch next {
+		case token.Colon:
+			element.Value = p.parseExpr()
+		}
 	}
+	return element
 }
 
 func (p *Parser) parseMapLit() *MapLit {
@@ -1227,6 +1240,23 @@ func (p *Parser) expect(token token.Token) Pos {
 	}
 	p.next()
 	return pos
+}
+
+func (p *Parser) expectAny(token ...token.Token) (Pos, token.Token) {
+	pos := p.pos
+
+	for _, t := range token {
+		if p.token == t {
+			p.next()
+			return pos, t
+		}
+	}
+	var s = make([]string, len(token))
+	for i, t := range token {
+		s[i] = "'" + t.String() + "'"
+	}
+	p.errorExpected(pos, strings.Join(s, " | "))
+	return 0, 0
 }
 
 func (p *Parser) expectSemi() {

@@ -1299,6 +1299,15 @@ func TestParseLogical(t *testing.T) {
 }
 
 func TestParseMap(t *testing.T) {
+	expectParse(t, "{ \"key1\" }", func(p pfn) []Stmt {
+		return stmts(
+			exprStmt(
+				mapLit(p(1, 1), p(1, 10),
+					mapElementLit(
+						"key1", p(1, 3), 0, nil))))
+	})
+	return
+
 	expectParse(t, "{ key1: 1, key2: \"2\", key3: true }", func(p pfn) []Stmt {
 		return stmts(
 			exprStmt(

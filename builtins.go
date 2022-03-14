@@ -1,6 +1,9 @@
 package tengo
 
-import "strconv"
+import (
+	"fmt"
+	"strconv"
+)
 
 var builtinFuncs = []*BuiltinFunction{
 	{
@@ -130,6 +133,43 @@ var builtinFuncs = []*BuiltinFunction{
 	{
 		Name:  "map",
 		Value: builtinMap,
+	},
+	{
+		Name:     "get_methods",
+		Value:    builtinGetMethods,
+		IsMethod: true,
+	},
+	{
+		Name:  "type",
+		Value: builtinType,
+	},
+	{
+		Name:  "typeof",
+		Value: builtinTypeOf,
+	},
+	{
+		Name:  "field",
+		Value: builtinField,
+	},
+	{
+		Name:  "fields",
+		Value: builtinFields,
+	},
+	{
+		Name:  "method",
+		Value: builtinMethod,
+	},
+	{
+		Name:  "methods",
+		Value: builtinMethods,
+	},
+	{
+		Name:  "property",
+		Value: builtinProperty,
+	},
+	{
+		Name:  "properties",
+		Value: builtinProperties,
 	},
 }
 
@@ -584,31 +624,18 @@ func builtinAppend(ctx *CallContext) (Object, error) {
 	}
 }
 
-// builtinDelete deletes Map keys
-// usage: delete(map, "key")
+// builtinDelete deletes Object keys
+// usage: delete(map, "key") or delete(map, "key1", "key2", "keyN")
 // key must be a string
 func builtinDelete(ctx *CallContext) (Object, error) {
 	argsLen := len(ctx.Args)
-	if argsLen != 2 {
+	if argsLen < 2 {
 		return nil, ErrWrongNumArguments
 	}
-	switch arg := ctx.Args[0].(type) {
-	case *Map:
-		if key, ok := ctx.Args[1].(*String); ok {
-			delete(arg.Value, key.Value)
-			return UndefinedValue, nil
-		}
-		return nil, ErrInvalidArgumentType{
-			Name:     "second",
-			Expected: "string",
-			Found:    ctx.Args[1].TypeName(),
-		}
-	default:
-		return nil, ErrInvalidArgumentType{
-			Name:     "first",
-			Expected: "map",
-			Found:    arg.TypeName(),
-		}
+	if err := ctx.Args[0].IndexDel(ctx.VM, ctx.Args[1:]...); err == nil {
+		return UndefinedValue, nil
+	} else {
+		return nil, err
 	}
 }
 
@@ -708,7 +735,7 @@ func builtinMap(ctx *CallContext) (Object, error) {
 				}
 			default:
 				return nil, ErrInvalidArgumentType{
-					Name:     "arg #"+strconv.Itoa(i),
+					Name:     "arg #" + strconv.Itoa(i),
 					Expected: "map",
 					Found:    t.TypeName(),
 				}
@@ -716,4 +743,259 @@ func builtinMap(ctx *CallContext) (Object, error) {
 		}
 	}
 	return &Map{Value: res}, nil
+}
+
+// get_methods
+func builtinGetMethods(ctx *CallContext) (Object, error) {
+	if !ctx.This.CanIterate() {
+		return nil, fmt.Errorf("not iterable: %s", ctx.This.TypeName())
+	}
+	var (
+		items []Object
+		item  Object
+	)
+	it := ctx.This.Iterate()
+	for it.Next() {
+		if item = it.Value(); item.Method() {
+			items = append(items, item)
+		}
+	}
+	return &Array{Value: items}, nil
+}
+
+// builtinTypeOf return type of object instance
+func builtinTypeOf(ctx *CallContext) (_ Object, err error) {
+	if len(ctx.Args) != 1 {
+		return nil, ErrWrongNumArguments
+	}
+	switch t := ctx.Args[0].(type) {
+	case ObjectInstancer:
+		return t.InstanceType(), nil
+	default:
+		return nil, ErrInvalidArgumentType{
+			Name:     "arg #0",
+			Expected: "instance",
+			Found:    t.TypeName(),
+		}
+	}
+}
+
+// builtinType define new type
+func builtinType(ctx *CallContext) (_ Object, err error) {
+	if len(ctx.Args) < 1 {
+		return nil, ErrWrongNumArguments
+	}
+
+	var (
+		name   string
+		args   = ctx.Args
+		kwargs = ctx.Kwargs
+	)
+
+start:
+	switch n := args[0].(type) {
+	case *String:
+		name = n.Value
+	case *Map:
+		if len(args) != 1 {
+			return nil, ErrWrongNumArguments
+		}
+		if len(kwargs) > 0 {
+			return nil, ErrUnexpectedKwargs
+		}
+		kwargs = n.Value
+		if nameValue, ok := kwargs["name"]; ok {
+			args = []Object{nameValue}
+		} else {
+			return nil, fmt.Errorf("name of type is undefined")
+		}
+		goto start
+	default:
+		return nil, ErrInvalidArgumentType{
+			Name:     "arg #0",
+			Expected: "string|map",
+			Found:    n.TypeName(),
+		}
+	}
+	if name == "" {
+		return nil, fmt.Errorf("name of type is empty")
+	}
+
+	t := &Type{
+		Name:       name,
+		Fields:     &TypeFields{Value: map[string]*TypeField{}},
+		Methods:    &TypeMethods{Value: map[string]*TypeMethod{}},
+		Properties: &TypeProperties{Value: map[string]*TypeProperty{}},
+	}
+
+	for i, arg := range args[1:] {
+		switch at := arg.(type) {
+		case *TypeFields:
+			t.Fields = at
+		case *TypeMethods:
+			t.Methods = at
+		case *TypeProperties:
+			t.Properties = at
+		default:
+			if i == 0 && arg.Method() {
+				t.New = arg
+			}
+		}
+	}
+
+	if fields, ok := kwargs["fields"]; ok {
+		switch vt := fields.(type) {
+		case *Map:
+			if err = t.Fields.FromMap(vt); err != nil {
+				return
+			}
+		case *TypeFields:
+			t.Fields = vt
+		default:
+			return nil, fmt.Errorf("'fields' isn't map or <fields>")
+		}
+	}
+
+	if val, ok := kwargs["methods"]; ok {
+		switch vt := val.(type) {
+		case *Map:
+			if err = t.Methods.FromMap(vt); err != nil {
+				return
+			}
+		case *TypeMethods:
+			t.Methods = vt
+		default:
+			return nil, fmt.Errorf("'methods' isn't map or <methods>")
+		}
+	}
+
+	if val, ok := kwargs["properties"]; ok {
+		switch vt := val.(type) {
+		case *Map:
+			if err = t.Properties.FromMap(vt); err != nil {
+				return
+			}
+		case *TypeProperties:
+			t.Properties = vt
+		default:
+			return nil, fmt.Errorf("'properties' isn't map or <properties>")
+		}
+	}
+
+	if value, ok := kwargs["new"]; ok {
+		if !value.CanCall() {
+			return nil, fmt.Errorf("'new' isn't callable")
+		}
+		t.New = value
+	}
+
+	return t, nil
+}
+
+// builtinField create new field
+// usage: field(value) or field(value, tag_name="tag_value")
+// value is any value
+func builtinField(ctx *CallContext) (Object, error) {
+	if len(ctx.Args) != 1 {
+		return nil, ErrWrongNumArguments
+	}
+	return &TypeField{Value: ctx.Args[0], Tags: ctx.Kwargs}, nil
+}
+
+// builtinFields create new fields
+// usage: fields(f1=value,f2=value)
+// value is any value
+func builtinFields(ctx *CallContext) (Object, error) {
+	var fields = make(map[string]*TypeField, len(ctx.Kwargs))
+	for name, value := range ctx.Kwargs {
+		switch t := value.(type) {
+		case *TypeField:
+			fields[name] = t
+		case *Default:
+			fields[name] = &TypeField{Value: UndefinedValue, Tags: make(map[string]Object, 0)}
+		default:
+			fields[name] = &TypeField{Value: value, Tags: make(map[string]Object, 0)}
+		}
+	}
+	return &TypeFields{Value: fields}, nil
+}
+
+// builtinMethod create new method
+// usage: method(caller) or method(caller, tag_name="tag_value")
+// caller is any callable value
+func builtinMethod(ctx *CallContext) (Object, error) {
+	if len(ctx.Args) != 1 {
+		return nil, ErrWrongNumArguments
+	}
+	if conv, ok := ctx.Args[0].(ToMethodConverter); ok {
+		return &TypeMethod{Value: conv, Tags: ctx.Kwargs}, nil
+	} else {
+		return nil, fmt.Errorf("value %s isn't convertible to method", ctx.Args[0].TypeName())
+	}
+}
+
+// builtinMethods create new methods
+// usage: methods(f1=callable, f2=method(callable), f3=method(callable, tag_name="tag_value")
+// callable is callable value
+func builtinMethods(ctx *CallContext) (Object, error) {
+	var methods = make(map[string]*TypeMethod, len(ctx.Kwargs))
+	for name, value := range ctx.Kwargs {
+		switch t := value.(type) {
+		case *TypeMethod:
+			methods[name] = t
+		default:
+			if !value.CanCall() {
+				return nil, fmt.Errorf("method %q: value isn't callable", name)
+			}
+			if conv, ok := t.(ToMethodConverter); ok {
+				methods[name] = &TypeMethod{Value: conv, Tags: make(map[string]Object, 0)}
+			} else {
+				return nil, fmt.Errorf("value %s isn't convertible to method", t.TypeName())
+			}
+		}
+	}
+	return &TypeMethods{Value: methods}, nil
+}
+
+// builtinProperty create new property
+// usage: property(getter, setter) or property(getter, setter, tag_name="tag_value")
+//        or method(get=getter, set=setter, tag_name="tag_value")
+// caller is any callable value
+func builtinProperty(ctx *CallContext) (Object, error) {
+	var (
+		p TypeProperty
+	)
+	switch len(ctx.Args) {
+	case 0:
+		p.Getter, p.Setter = ctx.Kwargs["get"], ctx.Kwargs["set"]
+		delete(ctx.Kwargs, "get")
+		delete(ctx.Kwargs, "set")
+	case 2:
+		p.Getter, p.Setter = ctx.Args[0], ctx.Args[1]
+	default:
+		return nil, ErrWrongNumArguments
+	}
+	p.Tags = ctx.Kwargs
+	return &p, nil
+}
+
+// builtinProperties create new properties
+// usage: properties(f1={get:getter}, f2=property(getter, setter))
+func builtinProperties(ctx *CallContext) (_ Object, err error) {
+	var properties = make(map[string]*TypeProperty, len(ctx.Kwargs))
+	for name, value := range ctx.Kwargs {
+		switch t := value.(type) {
+		case *TypeProperty:
+			properties[name] = t
+		case *Map:
+			var p TypeProperty
+			if err = p.FromMap(t); err != nil {
+				return
+			}
+			properties[name] = &p
+		default:
+			return nil, fmt.Errorf("bad property %q value type", name)
+		}
+	}
+	return &TypeProperties{Value: properties}, nil
 }

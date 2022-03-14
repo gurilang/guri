@@ -27,7 +27,7 @@ fib := func(x) {
 		return 1
 	}
 
-	return fib(x-1) + fib(x-2)
+	return callee(x-1) + callee(x-2)
 }
 ` + fmt.Sprintf("out = fib(%d)", n)
 
@@ -64,7 +64,7 @@ fib := func(x, s) {
 		return 1 + s
 	}
 
-	return fib(x-1, fib(x-2, s))
+	return callee(x-1, callee(x-2, s))
 }
 ` + fmt.Sprintf("out = fib(%d, 0)", n)
 
@@ -101,7 +101,7 @@ fib := func(x, a, b) {
 		return b
 	}
 
-	return fib(x-1, b, a+b)
+	return callee(x-1, b, a+b)
 }
 ` + fmt.Sprintf("out = fib(%d, 0, 1)", n)
 

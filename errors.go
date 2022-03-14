@@ -19,6 +19,9 @@ var (
 	// ErrInvalidIndexType represents an invalid index type.
 	ErrInvalidIndexType = errors.New("invalid index type")
 
+	// ErrInvalidIndex represents an invalid index.
+	ErrInvalidIndex = errors.New("invalid index")
+
 	// ErrInvalidIndexValueType represents an invalid index value type.
 	ErrInvalidIndexValueType = errors.New("invalid index value type")
 
@@ -48,6 +51,10 @@ var (
 	// ErrNotIndexAssignable is an error where an Object is not index
 	// assignable.
 	ErrNotIndexAssignable = errors.New("not index-assignable")
+
+	// ErrNotIndexDeletable is an error where an Object is not index
+	// deletable.
+	ErrNotIndexDeletable = errors.New("not index-deletable")
 
 	// ErrNotImplemented is an error where an Object has not implemented a
 	// required method.

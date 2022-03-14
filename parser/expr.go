@@ -474,6 +474,9 @@ func (e *MapElementLit) End() Pos {
 }
 
 func (e *MapElementLit) String() string {
+	if e.Value == nil {
+		return e.Key
+	}
 	return e.Key + ": " + e.Value.String()
 }
 

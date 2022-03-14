@@ -6,6 +6,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/d5/tengo/v2/parser"
@@ -24,6 +25,33 @@ var (
 
 	// DefaultValue represents an undefined kwarg value.
 	DefaultValue Object = &Default{}
+)
+
+type (
+	// ToMapConverter converts object to map.
+	ToMapConverter interface {
+		Object
+		ToMap(deep bool) *Map
+	}
+
+	// FromMap reset object values from map.
+	FromMapLoader interface {
+		Object
+		FromMap(m *Map) error
+	}
+
+	// ToArrayConverter converts object to array
+	ToArrayConverter interface {
+		Object
+		ToArray(deep bool) *Array
+	}
+
+	// ToMethodConverter converts callabled object to method of instance
+	ToMethodConverter interface {
+		Object
+		// ToMethod converts this caller to method of instance
+		ToMethodOf(of Object) ToMethodConverter
+	}
 )
 
 // Object represents an object in the VM.
@@ -59,14 +87,20 @@ type Object interface {
 	// indexable, ErrNotIndexable should be returned as error. If nil is
 	// returned as value, it will be converted to UndefinedToken value by the
 	// runtime.
-	IndexGet(index Object) (value Object, err error)
+	IndexGet(_ *VM, index Object) (value Object, err error)
 
 	// IndexSet should take an index Object and a value Object for index
 	// assignable objects. Index assignable is an object that can take an index
 	// and a value on the left-hand side of the assignment statement. If Object
 	// is not index assignable, ErrNotIndexAssignable should be returned as
 	// error. If an error is returned, it will be treated as a run-time error.
-	IndexSet(index, value Object) error
+	IndexSet(_ *VM, index, value Object) error
+
+	// IndexDel should delete an index Object and a value Object for index
+	// assignable objects. Index deletable is an object that can delete an index.
+	// If Object is not index deletable, ErrNotIndexDeletable should be returned as
+	// error. If an error is returned, it will be treated as a run-time error.
+	IndexDel(_ *VM, _ ...Object) error
 
 	// Iterate should return an Iterator for the type.
 	Iterate() Iterator
@@ -80,6 +114,12 @@ type Object interface {
 
 	// CanCall should return whether the Object can be Called.
 	CanCall() bool
+
+	// Method should return if caller is method
+	Method() bool
+
+	// MethodTo should return instance of this method
+	MethodTo() Object
 }
 
 // ObjectImpl represents a default Object Implementation. To defined a new
@@ -121,13 +161,18 @@ func (o *ObjectImpl) Equals(x Object) bool {
 }
 
 // IndexGet returns an element at a given index.
-func (o *ObjectImpl) IndexGet(_ Object) (res Object, err error) {
+func (o *ObjectImpl) IndexGet(_ *VM, _ Object) (res Object, err error) {
 	return nil, ErrNotIndexable
 }
 
 // IndexSet sets an element at a given index.
-func (o *ObjectImpl) IndexSet(_, _ Object) (err error) {
+func (o *ObjectImpl) IndexSet(_ *VM, _, _ Object) (err error) {
 	return ErrNotIndexAssignable
+}
+
+// IndexDel deletes an element at a given index.
+func (o *ObjectImpl) IndexDel(_ *VM, _ ...Object) (err error) {
+	return ErrNotIndexDeletable
 }
 
 // Iterate returns an iterator.
@@ -149,6 +194,16 @@ func (o *ObjectImpl) Call(*CallContext) (ret Object, err error) {
 // CanCall returns whether the Object can be Called.
 func (o *ObjectImpl) CanCall() bool {
 	return false
+}
+
+// Method shold return if caller is method
+func (o *ObjectImpl) Method() bool {
+	return false
+}
+
+// MethodTo should return instance of this method
+func (*ObjectImpl) MethodTo() Object {
+	return nil
 }
 
 // Array represents an array of objects.
@@ -223,7 +278,7 @@ func (o *Array) Equals(x Object) bool {
 }
 
 // IndexGet returns an element at a given index.
-func (o *Array) IndexGet(index Object) (res Object, err error) {
+func (o *Array) IndexGet(_ *VM, index Object) (res Object, err error) {
 	intIdx, ok := index.(*Int)
 	if !ok {
 		err = ErrInvalidIndexType
@@ -239,7 +294,7 @@ func (o *Array) IndexGet(index Object) (res Object, err error) {
 }
 
 // IndexSet sets an element at a given index.
-func (o *Array) IndexSet(index, value Object) (err error) {
+func (o *Array) IndexSet(_ *VM, index, value Object) (err error) {
 	intIdx, ok := ToInt(index)
 	if !ok {
 		err = ErrInvalidIndexType
@@ -264,6 +319,26 @@ func (o *Array) Iterate() Iterator {
 // CanIterate returns whether the Object can be Iterated.
 func (o *Array) CanIterate() bool {
 	return true
+}
+
+// ToArrayConverter converts object to array. If not deep, returns this object,
+// other else, return new array with deeped values
+func (o *Array) ToArray(deep bool) *Array {
+	if deep {
+		ret := make([]Object, len(o.Value))
+		for i, v := range o.Value {
+			switch t := v.(type) {
+			case ToArrayConverter:
+				ret[i] = t.ToArray(true)
+			case ToMapConverter:
+				ret[i] = t.ToMap(true)
+			default:
+				ret[i] = t
+			}
+		}
+		return &Array{Value: ret}
+	}
+	return o
 }
 
 // Bool represents a boolean value.
@@ -323,8 +398,10 @@ func (o *Bool) GobEncode() (b []byte, err error) {
 // BuiltinFunction represents a builtin function.
 type BuiltinFunction struct {
 	ObjectImpl
-	Name  string
-	Value CallableFuncCtx
+	Name         string
+	Value        CallableFuncCtx
+	IsMethod     bool
+	methodTarget Object
 }
 
 // TypeName returns the name of the type.
@@ -337,8 +414,8 @@ func (o *BuiltinFunction) String() string {
 }
 
 // Copy returns a copy of the type.
-func (o *BuiltinFunction) Copy() Object {
-	return &BuiltinFunction{Value: o.Value}
+func (o BuiltinFunction) Copy() Object {
+	return &o
 }
 
 // Equals returns true if the value of the type is equal to the value of
@@ -355,6 +432,22 @@ func (o *BuiltinFunction) Call(ctx *CallContext) (Object, error) {
 // CanCall returns whether the Object can be Called.
 func (o *BuiltinFunction) CanCall() bool {
 	return true
+}
+
+// Method shold return if caller is method
+func (o *BuiltinFunction) Method() bool {
+	return o.IsMethod
+}
+
+// Target should return current method target
+func (o *BuiltinFunction) MethodTo() Object {
+	return o.methodTarget
+}
+
+// Target should set current method target
+func (o BuiltinFunction) ToMethodOf(of Object) ToMethodConverter {
+	o.methodTarget = of
+	return &o
 }
 
 // BuiltinModule is an importable module that's written in Go.
@@ -429,7 +522,7 @@ func (o *Bytes) Equals(x Object) bool {
 }
 
 // IndexGet returns an element (as Int) at a given index.
-func (o *Bytes) IndexGet(index Object) (res Object, err error) {
+func (o *Bytes) IndexGet(_ *VM, index Object) (res Object, err error) {
 	intIdx, ok := index.(*Int)
 	if !ok {
 		err = ErrInvalidIndexType
@@ -594,16 +687,21 @@ type Variadic struct {
 // CompiledFunction represents a compiled function.
 type CompiledFunction struct {
 	ObjectImpl
-	Instructions   []byte
-	NumLocals      int // number of local variables (including function parameters)
-	NumArgs        int
-	VarArgs        Variadic
-	Kwargs         map[string]int
-	KwargsDefaults []Object
-	KwargsNames    []string
-	VarKwargs      Variadic
-	SourceMap      map[int]parser.Pos
-	Free           []*ObjectPtr
+	Instructions     []byte
+	NumLocals        int // number of local variables (including function parameters)
+	NumArgs          int
+	VarArgs          Variadic
+	Kwargs           map[string]int
+	KwargsNames      []string
+	KwargsDefaults   []Object
+	VarKwargs        Variadic
+	SourceMap        map[int]parser.Pos
+	IsMethod         bool // receive `this` as first arg
+	methodTarget     Object
+	Free             []*ObjectPtr
+	vm               *VM
+	vmConstantsCount int
+	running          uint32
 }
 
 // TypeName returns the name of the type.
@@ -613,6 +711,14 @@ func (o *CompiledFunction) TypeName() string {
 
 func (o *CompiledFunction) String() string {
 	return "<compiled-function>"
+}
+
+func (o *CompiledFunction) Method() bool {
+	return o.IsMethod
+}
+
+func (o *CompiledFunction) MethodTo() Object {
+	return o.methodTarget
 }
 
 // Copy returns a copy of the type.
@@ -626,8 +732,16 @@ func (o *CompiledFunction) Copy() Object {
 		KwargsNames:    o.KwargsNames,
 		KwargsDefaults: o.KwargsDefaults,
 		VarKwargs:      o.VarKwargs,
+		IsMethod:       o.IsMethod,
+		methodTarget:   o.methodTarget,
 		Free:           append([]*ObjectPtr{}, o.Free...), // DO NOT Copy() of elements; these are variable pointers
 	}
+}
+
+// ToMethod converts this caller to method of instance
+func (o CompiledFunction) ToMethodOf(of Object) ToMethodConverter {
+	o.methodTarget = of
+	return &o
 }
 
 // Equals returns true if the value of the type is equal to the value of
@@ -650,6 +764,59 @@ func (o *CompiledFunction) SourcePos(ip int) parser.Pos {
 // CanCall returns whether the Object can be Called.
 func (o *CompiledFunction) CanCall() bool {
 	return true
+}
+
+func (o *CompiledFunction) SetupVM(vm *VM) {
+	constsOffset := len(vm.bc.Constants)
+
+	// Load fn
+	inst := MakeInstruction(parser.OpConstant, constsOffset)
+
+	// Load args
+	inst = append(inst,
+		MakeInstruction(parser.OpConstant, constsOffset+1)...)
+	// Load kwargs
+	inst = append(inst,
+		MakeInstruction(parser.OpConstant, constsOffset+2)...)
+
+	// Call, set value to a global, stop
+	inst = append(inst, MakeInstruction(parser.OpCall, 0, 1, 0, 1)...)
+	inst = append(inst, MakeInstruction(parser.OpSuspend)...)
+
+	bc := *vm.bc
+	bc.Constants = append(bc.Constants, o, &Array{}, &Map{})
+
+	bc.MainFunction = &CompiledFunction{
+		Instructions: inst,
+	}
+
+	o.vm = NewVM(&bc, vm.globals, vm.maxAllocs)
+	o.vm.context = vm.context
+	o.vmConstantsCount = constsOffset + 3
+}
+
+// Call should take an arbitrary number of arguments and returns a return
+// value and/or an error, which the VM will consider as a run-time error.
+func (o *CompiledFunction) Call(ctx *CallContext) (ret Object, err error) {
+	if atomic.LoadUint32(&o.running) == 1 {
+		err = fmt.Errorf("compile function is running")
+		return
+	}
+
+	atomic.StoreUint32(&o.running, 1)
+	defer atomic.StoreUint32(&o.running, 0)
+
+	if o.vm == nil {
+		o.SetupVM(ctx.VM)
+	}
+
+	o.vm.bc.Constants[o.vmConstantsCount-2].(*Array).Value = ctx.Args
+	o.vm.bc.Constants[o.vmConstantsCount-1].(*Map).Value = ctx.Kwargs
+
+	if err = o.vm.Run(); err == nil {
+		ret = o.vm.stack[0]
+	}
+	return
 }
 
 // Error represents an error value.
@@ -687,7 +854,7 @@ func (o *Error) Equals(x Object) bool {
 }
 
 // IndexGet returns an element at a given index.
-func (o *Error) IndexGet(index Object) (res Object, err error) {
+func (o *Error) IndexGet(_ *VM, index Object) (res Object, err error) {
 	if strIdx, _ := ToString(index); strIdx != "value" {
 		err = ErrInvalidIndexOnError
 		return
@@ -902,7 +1069,7 @@ func (o *ImmutableArray) Equals(x Object) bool {
 }
 
 // IndexGet returns an element at a given index.
-func (o *ImmutableArray) IndexGet(index Object) (res Object, err error) {
+func (o *ImmutableArray) IndexGet(_ *VM, index Object) (res Object, err error) {
 	intIdx, ok := index.(*Int)
 	if !ok {
 		err = ErrInvalidIndexType
@@ -964,7 +1131,7 @@ func (o *ImmutableMap) IsFalsy() bool {
 }
 
 // IndexGet returns the value for the given key.
-func (o *ImmutableMap) IndexGet(index Object) (res Object, err error) {
+func (o *ImmutableMap) IndexGet(_ *VM, index Object) (res Object, err error) {
 	strIdx, ok := ToString(index)
 	if !ok {
 		err = ErrInvalidIndexType
@@ -1017,6 +1184,22 @@ func (o *ImmutableMap) Iterate() Iterator {
 // CanIterate returns whether the Object can be Iterated.
 func (o *ImmutableMap) CanIterate() bool {
 	return true
+}
+
+// ToMap convert to map.
+func (o *ImmutableMap) ToMap(deep bool) *Map {
+	if deep {
+		m := make(map[string]Object, len(o.Value))
+		for k, v := range o.Value {
+			if c, ok := v.(ToMapConverter); ok {
+				m[k] = c.ToMap(true)
+			} else {
+				m[k] = v
+			}
+		}
+		return &Map{Value: m}
+	}
+	return &Map{Value: o.Value}
 }
 
 // Int represents an integer value.
@@ -1267,7 +1450,7 @@ func (o *Map) Equals(x Object) bool {
 }
 
 // IndexGet returns the value for the given key.
-func (o *Map) IndexGet(index Object) (res Object, err error) {
+func (o *Map) IndexGet(_ *VM, index Object) (res Object, err error) {
 	strIdx, ok := ToString(index)
 	if !ok {
 		err = ErrInvalidIndexType
@@ -1281,13 +1464,26 @@ func (o *Map) IndexGet(index Object) (res Object, err error) {
 }
 
 // IndexSet sets the value for the given key.
-func (o *Map) IndexSet(index, value Object) (err error) {
+func (o *Map) IndexSet(_ *VM, index, value Object) (err error) {
 	strIdx, ok := ToString(index)
 	if !ok {
 		err = ErrInvalidIndexType
 		return
 	}
 	o.Value[strIdx] = value
+	return nil
+}
+
+// IndexDel deletes the value for the given key.
+func (o *Map) IndexDel(_ *VM, index ...Object) (err error) {
+	for _, index := range index {
+		strIdx, ok := ToString(index)
+		if !ok {
+			err = ErrInvalidIndexType
+			return
+		}
+		delete(o.Value, strIdx)
+	}
 	return nil
 }
 
@@ -1302,6 +1498,22 @@ func (o *Map) Iterate() Iterator {
 		k: keys,
 		l: len(keys),
 	}
+}
+
+// ToMap convert to map.
+func (o *Map) ToMap(deep bool) *Map {
+	if deep {
+		m := make(map[string]Object, len(o.Value))
+		for k, v := range o.Value {
+			if c, ok := v.(ToMapConverter); ok {
+				m[k] = c.ToMap(true)
+			} else {
+				m[k] = v
+			}
+		}
+		return &Map{Value: m}
+	}
+	return o
 }
 
 // CanIterate returns whether the Object can be Iterated.
@@ -1431,7 +1643,7 @@ func (o *String) Equals(x Object) bool {
 }
 
 // IndexGet returns a character at a given index.
-func (o *String) IndexGet(index Object) (res Object, err error) {
+func (o *String) IndexGet(_ *VM, index Object) (res Object, err error) {
 	intIdx, ok := index.(*Int)
 	if !ok {
 		err = ErrInvalidIndexType
@@ -1577,7 +1789,7 @@ func (o *Undefined) Equals(x Object) bool {
 }
 
 // IndexGet returns an element at a given index.
-func (o *Undefined) IndexGet(_ Object) (Object, error) {
+func (o *Undefined) IndexGet(_ *VM, _ Object) (Object, error) {
 	return UndefinedValue, nil
 }
 
@@ -1637,7 +1849,7 @@ func (o *Default) Equals(x Object) bool {
 }
 
 // IndexGet returns an element at a given index.
-func (o *Default) IndexGet(_ Object) (Object, error) {
+func (o *Default) IndexGet(_ *VM, _ Object) (Object, error) {
 	return UndefinedValue, nil
 }
 
@@ -1669,8 +1881,10 @@ func (o *Default) Value() Object {
 // UserFunction represents a user function.
 type UserFunction struct {
 	ObjectImpl
-	Name  string
-	Value CallableFunc
+	Name     string
+	Value    CallableFunc
+	IsMethod bool
+	Target   Object
 }
 
 // TypeName returns the name of the type.
@@ -1683,8 +1897,13 @@ func (o *UserFunction) String() string {
 }
 
 // Copy returns a copy of the type.
-func (o *UserFunction) Copy() Object {
-	return &UserFunction{Value: o.Value, Name: o.Name}
+func (o UserFunction) Copy() Object {
+	return &o
+}
+
+// Method shold return if caller is method
+func (o *UserFunction) Method() bool {
+	return o.IsMethod
 }
 
 // Equals returns true if the value of the type is equal to the value of
@@ -1706,11 +1925,22 @@ func (o *UserFunction) CanCall() bool {
 	return true
 }
 
+func (o *UserFunction) MethodTo() Object {
+	return o.Target
+}
+
+func (o UserFunction) ToMethodOf(of Object) ToMethodConverter {
+	o.Target = of
+	return &o
+}
+
 // UserFunctionCtx represents a user function with call context.
 type UserFunctionCtx struct {
 	ObjectImpl
-	Name  string
-	Value CallableFuncCtx
+	Name     string
+	Value    CallableFuncCtx
+	IsMethod bool
+	Target   Object
 }
 
 // TypeName returns the name of the type.
@@ -1723,8 +1953,8 @@ func (o *UserFunctionCtx) String() string {
 }
 
 // Copy returns a copy of the type.
-func (o *UserFunctionCtx) Copy() Object {
-	return &UserFunctionCtx{Value: o.Value}
+func (o UserFunctionCtx) Copy() Object {
+	return &o
 }
 
 // Equals returns true if the value of the type is equal to the value of
@@ -1741,6 +1971,21 @@ func (o *UserFunctionCtx) Call(ctx *CallContext) (ret Object, err error) {
 // CanCall returns whether the Object can be Called.
 func (o *UserFunctionCtx) CanCall() bool {
 	return true
+}
+
+// Method shold return if caller is method
+func (o *UserFunctionCtx) Method() bool {
+	return o.IsMethod
+}
+
+// Target should return current method target
+func (o *UserFunctionCtx) MethodTo() Object {
+	return o.Target
+}
+
+func (o UserFunctionCtx) ToMethodOf(of Object) ToMethodConverter {
+	o.Target = of
+	return &o
 }
 
 // VmContextObject represents the VmContext object

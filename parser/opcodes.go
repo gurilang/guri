@@ -19,7 +19,7 @@ const (
 	OpOrJump                      // Logical OR jump
 	OpJump                        // Jump
 	OpNull                        // Push null
-	OpNullKwarg                   // Push null_kwarg
+	OpDefault                     // Push default
 	OpCallee                      // Push callee
 	OpCalledArgs                  // Push argv
 	OpCalledKwargs                // Push kwargv
@@ -69,7 +69,7 @@ var OpcodeNames = [...]string{
 	OpOrJump:        "ORJMP",
 	OpJump:          "JMP",
 	OpNull:          "NULL",
-	OpNullKwarg:     "NULLKW",
+	OpDefault:       "DEFAULT",
 	OpGetGlobal:     "GETG",
 	OpSetGlobal:     "SETG",
 	OpSetSelGlobal:  "SETSG",
@@ -116,7 +116,7 @@ var OpcodeOperands = [...][]int{
 	OpOrJump:        {2},
 	OpJump:          {2},
 	OpNull:          {},
-	OpNullKwarg:     {},
+	OpDefault:       {},
 	OpGetGlobal:     {2},
 	OpSetGlobal:     {2},
 	OpSetSelGlobal:  {2, 1},
